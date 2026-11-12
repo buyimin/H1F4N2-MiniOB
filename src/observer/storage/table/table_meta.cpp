@@ -82,15 +82,29 @@ RC TableMeta::init(int32_t table_id, const char *name, const vector<FieldMeta> *
 
   for (size_t i = 0; i < attributes.size(); i++) {
     const AttrInfoSqlNode &attr_info = attributes[i];
+    int field_len = attr_info.length;
+    if (attr_info.type == AttrType::DATES) {
+      // DATE 固定使用 4 字节的 YYYYMMDD 存储，忽略 DATE(n) 中的长度
+      field_len = 4;
+    } else if (attr_info.type == AttrType::VECTORS) {
+      // VECTOR(n) 的 n 是元素个数，每个元素 4 字节
+      if (attr_info.length <= 0 || attr_info.length > 16383) {
+        LOG_ERROR("invalid vector dimension. table name=%s, field name=%s, dim=%d",
+            name, attr_info.name.c_str(), attr_info.length);
+        return RC::INVALID_ARGUMENT;
+      }
+      field_len = attr_info.length * static_cast<int>(sizeof(float));
+    }
+
     // `i` is the col_id of fields[i]
     rc = fields_[i + trx_field_num].init(
-      attr_info.name.c_str(), attr_info.type, field_offset, attr_info.length, true /*visible*/, i);
+      attr_info.name.c_str(), attr_info.type, field_offset, field_len, true /*visible*/, i);
     if (OB_FAIL(rc)) {
       LOG_ERROR("Failed to init field meta. table name=%s, field name: %s", name, attr_info.name.c_str());
       return rc;
     }
 
-    field_offset += attr_info.length;
+    field_offset += field_len;
   }
 
   primary_keys_ = primary_keys;

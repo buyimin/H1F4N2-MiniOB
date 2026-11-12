@@ -76,6 +76,17 @@ struct ConditionSqlNode
 };
 
 /**
+ * @brief 描述 select 语句中的一个表
+ * @details conditions 保存用于连接该表的 ON 条件。
+ *          第一个表和逗号连接的表 conditions 为空。
+ */
+struct RelationSqlNode
+{
+  string                   relation_name;
+  vector<ConditionSqlNode> conditions;
+};
+
+/**
  * @brief 描述一个select语句
  * @ingroup SQLParser
  * @details 一个正常的select语句描述起来比这个要复杂很多，这里做了简化。
@@ -89,7 +100,7 @@ struct ConditionSqlNode
 struct SelectSqlNode
 {
   vector<unique_ptr<Expression>> expressions;  ///< 查询的表达式
-  vector<string>                 relations;    ///< 查询的表
+  vector<RelationSqlNode>        relations;    ///< 查询的表及其 ON 条件
   vector<ConditionSqlNode>       conditions;   ///< 查询条件，使用AND串联起来多个条件
   vector<unique_ptr<Expression>> group_by;     ///< group by clause
 };

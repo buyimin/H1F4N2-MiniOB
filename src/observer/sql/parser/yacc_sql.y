@@ -11,6 +11,7 @@
 #include "sql/parser/yacc_sql.hpp"
 #include "sql/parser/lex_sql.h"
 #include "sql/expr/expression.h"
+#include "common/type/vector_type.h"
 
 using namespace std;
 
@@ -88,7 +89,14 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
         INT_T
         STRING_T
         FLOAT_T
+        DATE_T
         VECTOR_T
+        INNER
+        JOIN
+        AS
+        STRING_TO_VECTOR
+        VECTOR_TO_STRING
+        DISTANCE
         HELP
         EXIT
         DOT //QUOTE
@@ -132,7 +140,7 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
   vector<Value> *                            value_list;
   vector<ConditionSqlNode> *                 condition_list;
   vector<RelAttrSqlNode> *                   rel_attr_list;
-  vector<string> *                           relation_list;
+  vector<RelationSqlNode> *                  relation_list;
   vector<string> *                           key_list;
   char *                                     cstring;
   int                                        number;
@@ -174,6 +182,7 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
 %type <key_list>            primary_key
 %type <key_list>            attr_list
 %type <relation_list>       rel_list
+%type <relation_list>       from_clause
 %type <expression>          expression
 %type <expression>          aggregate_expression
 %type <expression_list>     expression_list
@@ -370,7 +379,7 @@ attr_def:
       $$ = new AttrInfoSqlNode;
       $$->type = (AttrType)$2;
       $$->name = $1;
-      $$->length = 4;
+      $$->length = ($2 == static_cast<int>(AttrType::VECTORS)) ? 2048 : 4;
     }
     ;
 number:
@@ -380,6 +389,7 @@ type:
     INT_T      { $$ = static_cast<int>(AttrType::INTS); }
     | STRING_T { $$ = static_cast<int>(AttrType::CHARS); }
     | FLOAT_T  { $$ = static_cast<int>(AttrType::FLOATS); }
+    | DATE_T   { $$ = static_cast<int>(AttrType::DATES); }
     | VECTOR_T { $$ = static_cast<int>(AttrType::VECTORS); }
     ;
 primary_key:
@@ -446,6 +456,17 @@ value:
       $$ = new Value(tmp);
       free(tmp);
     }
+    | STRING_TO_VECTOR LBRACE SSS RBRACE {
+      char *tmp = common::substr($3, 1, strlen($3) - 2);
+      vector<float> values;
+      RC rc = VectorType::parse(string(tmp), values);
+      free(tmp);
+      $$ = new Value();
+      if (OB_SUCC(rc)) {
+        $$->set_vector(values.data(), static_cast<int>(values.size()));
+      }
+      @$ = @1;
+    }
     ;
 storage_format:
     /* empty */
@@ -482,8 +503,19 @@ update_stmt:      /*  update 语句的语法解析树*/
       }
     }
     ;
+from_clause:
+    /* empty */
+    {
+      $$ = new vector<RelationSqlNode>();
+    }
+    | FROM rel_list
+    {
+      $$ = $2;
+    }
+    ;
+
 select_stmt:        /*  select 语句的语法解析树*/
-    SELECT expression_list FROM rel_list where group_by
+    SELECT expression_list from_clause where group_by
     {
       $$ = new ParsedSqlNode(SCF_SELECT);
       if ($2 != nullptr) {
@@ -569,6 +601,21 @@ expression:
     | aggregate_expression {
       $$ = $1;
     }
+    | VECTOR_TO_STRING LBRACE expression RBRACE {
+      $$ = new VectorFunctionExpr(VectorFunctionExpr::Type::VECTOR_TO_STRING, "", $3);
+      $$->set_name(token_name(sql_string, &@$));
+    }
+    | DISTANCE LBRACE expression COMMA expression COMMA SSS RBRACE {
+      char *tmp = common::substr($7, 1, strlen($7) - 2);
+      string metric(tmp);
+      free(tmp);
+      $$ = new VectorFunctionExpr(VectorFunctionExpr::Type::DISTANCE, metric, $3, $5);
+      $$->set_name(token_name(sql_string, &@$));
+    }
+    | expression AS ID {
+      $$ = $1;
+      $$->set_name($3);
+    }
     ;
 
 aggregate_expression:
@@ -596,17 +643,26 @@ relation:
     ;
 rel_list:
     relation {
-      $$ = new vector<string>();
-      $$->push_back($1);
+      $$ = new vector<RelationSqlNode>();
+      RelationSqlNode relation_node;
+      relation_node.relation_name = $1;
+      $$->push_back(std::move(relation_node));
     }
-    | relation COMMA rel_list {
-      if ($3 != nullptr) {
-        $$ = $3;
-      } else {
-        $$ = new vector<string>;
+    | rel_list COMMA relation {
+      $$ = $1;
+      RelationSqlNode relation_node;
+      relation_node.relation_name = $3;
+      $$->push_back(std::move(relation_node));
+    }
+    | rel_list INNER JOIN relation ON condition_list {
+      $$ = $1;
+      RelationSqlNode relation_node;
+      relation_node.relation_name = $4;
+      if ($6 != nullptr) {
+        relation_node.conditions.swap(*$6);
+        delete $6;
       }
-
-      $$->insert($$->begin(), $1);
+      $$->push_back(std::move(relation_node));
     }
     ;
 

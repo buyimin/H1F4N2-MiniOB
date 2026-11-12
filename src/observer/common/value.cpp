@@ -40,6 +40,9 @@ Value::Value(const Value &other)
     case AttrType::CHARS: {
       set_string_from_other(other);
     } break;
+    case AttrType::VECTORS: {
+      set_vector_from_other(other);
+    } break;
 
     default: {
       this->value_ = other.value_;
@@ -69,6 +72,9 @@ Value &Value::operator=(const Value &other)
   switch (this->attr_type_) {
     case AttrType::CHARS: {
       set_string_from_other(other);
+    } break;
+    case AttrType::VECTORS: {
+      set_vector_from_other(other);
     } break;
 
     default: {
@@ -102,6 +108,12 @@ void Value::reset()
         value_.pointer_value_ = nullptr;
       }
       break;
+    case AttrType::VECTORS:
+      if (own_data_ && value_.pointer_value_ != nullptr) {
+        delete[] value_.pointer_value_;
+        value_.pointer_value_ = nullptr;
+      }
+      break;
     default: break;
   }
 
@@ -128,6 +140,23 @@ void Value::set_data(char *data, int length)
       value_.bool_value_ = *(int *)data != 0;
       length_            = length;
     } break;
+    case AttrType::DATES: {
+      value_.int_value_ = *(int *)data;
+      length_           = length;
+    } break;
+    case AttrType::VECTORS: {
+      if (data != nullptr && length > 0) {
+        char *tmp = new char[length];
+        memcpy(tmp, data, length);
+        value_.pointer_value_ = tmp;
+        length_               = length;
+        own_data_             = true;
+      } else {
+        value_.pointer_value_ = nullptr;
+        length_               = 0;
+        own_data_             = false;
+      }
+    } break;
     default: {
       LOG_WARN("unknown data type: %d", attr_type_);
     } break;
@@ -140,6 +169,33 @@ void Value::set_int(int val)
   attr_type_        = AttrType::INTS;
   value_.int_value_ = val;
   length_           = sizeof(val);
+}
+
+void Value::set_date(int val)
+{
+  reset();
+  attr_type_        = AttrType::DATES;
+  value_.int_value_ = val;
+  length_           = sizeof(val);
+}
+
+void Value::set_vector(const float *data, int dim)
+{
+  reset();
+  attr_type_ = AttrType::VECTORS;
+  if (data == nullptr || dim <= 0) {
+    value_.pointer_value_ = nullptr;
+    length_               = 0;
+    own_data_             = false;
+    return;
+  }
+
+  const int len = dim * static_cast<int>(sizeof(float));
+  char     *tmp = new char[len];
+  memcpy(tmp, data, len);
+  value_.pointer_value_ = tmp;
+  length_               = len;
+  own_data_             = true;
 }
 
 void Value::set_float(float val)
@@ -206,6 +262,12 @@ void Value::set_value(const Value &value)
     case AttrType::BOOLEANS: {
       set_boolean(value.get_boolean());
     } break;
+    case AttrType::DATES: {
+      set_date(value.get_int());
+    } break;
+    case AttrType::VECTORS: {
+      set_vector(reinterpret_cast<const float *>(value.data()), value.length() / static_cast<int>(sizeof(float)));
+    } break;
     default: {
       ASSERT(false, "got an invalid value type");
     } break;
@@ -222,10 +284,27 @@ void Value::set_string_from_other(const Value &other)
   }
 }
 
+void Value::set_vector_from_other(const Value &other)
+{
+  ASSERT(attr_type_ == AttrType::VECTORS, "attr type is not VECTORS");
+  if (other.value_.pointer_value_ != nullptr && length_ > 0) {
+    char *tmp = new char[length_];
+    memcpy(tmp, other.value_.pointer_value_, length_);
+    value_.pointer_value_ = tmp;
+    own_data_             = true;
+  } else {
+    value_.pointer_value_ = nullptr;
+    own_data_             = false;
+  }
+}
+
 char *Value::data() const
 {
   switch (attr_type_) {
     case AttrType::CHARS: {
+      return value_.pointer_value_;
+    } break;
+    case AttrType::VECTORS: {
       return value_.pointer_value_;
     } break;
     default: {
@@ -267,6 +346,9 @@ int Value::get_int() const
     case AttrType::BOOLEANS: {
       return (int)(value_.bool_value_);
     }
+    case AttrType::DATES: {
+      return value_.int_value_;
+    }
     default: {
       LOG_WARN("unknown data type. type=%d", attr_type_);
       return 0;
@@ -294,6 +376,9 @@ float Value::get_float() const
     } break;
     case AttrType::BOOLEANS: {
       return float(value_.bool_value_);
+    } break;
+    case AttrType::DATES: {
+      return float(value_.int_value_);
     } break;
     default: {
       LOG_WARN("unknown data type. type=%d", attr_type_);
@@ -341,6 +426,9 @@ bool Value::get_boolean() const
     } break;
     case AttrType::BOOLEANS: {
       return value_.bool_value_;
+    } break;
+    case AttrType::DATES: {
+      return value_.int_value_ != 0;
     } break;
     default: {
       LOG_WARN("unknown data type. type=%d", attr_type_);

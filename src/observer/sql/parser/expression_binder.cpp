@@ -15,6 +15,7 @@ See the Mulan PSL v2 for more details. */
 #include "common/log/log.h"
 #include "common/lang/string.h"
 #include "common/lang/ranges.h"
+#include "common/type/vector_type.h"
 #include "sql/parser/expression_binder.h"
 #include "sql/expr/expression_iterator.h"
 
@@ -84,6 +85,10 @@ RC ExpressionBinder::bind_expression(unique_ptr<Expression> &expr, vector<unique
 
     case ExprType::ARITHMETIC: {
       return bind_arithmetic_expression(expr, bound_expressions);
+    } break;
+
+    case ExprType::VECTOR_FUNCTION: {
+      return bind_vector_function_expression(expr, bound_expressions);
     } break;
 
     case ExprType::AGGREGATION: {
@@ -397,6 +402,82 @@ RC check_aggregate_expression(AggregateExpr &expression)
   RC rc = ExpressionIterator::iterate_child_expr(expression, check_aggregate_expr);
 
   return rc;
+}
+
+RC ExpressionBinder::bind_vector_function_expression(
+    unique_ptr<Expression> &expr, vector<unique_ptr<Expression>> &bound_expressions)
+{
+  if (nullptr == expr) {
+    return RC::SUCCESS;
+  }
+
+  auto vector_function_expr = static_cast<VectorFunctionExpr *>(expr.get());
+
+  auto bind_child = [this](unique_ptr<Expression> &child) -> RC {
+    vector<unique_ptr<Expression>> child_bound_expressions;
+    RC                             rc = bind_expression(child, child_bound_expressions);
+    if (OB_FAIL(rc)) {
+      return rc;
+    }
+    if (child_bound_expressions.size() != 1) {
+      LOG_WARN("invalid children number of vector function: %d", child_bound_expressions.size());
+      return RC::INVALID_ARGUMENT;
+    }
+    if (child_bound_expressions[0].get() != child.get()) {
+      child.reset(child_bound_expressions[0].release());
+    }
+    return RC::SUCCESS;
+  };
+
+  if (vector_function_expr->left()) {
+    RC rc = bind_child(vector_function_expr->left());
+    if (OB_FAIL(rc)) {
+      return rc;
+    }
+  }
+  if (vector_function_expr->right()) {
+    RC rc = bind_child(vector_function_expr->right());
+    if (OB_FAIL(rc)) {
+      return rc;
+    }
+  }
+
+  switch (vector_function_expr->func_type()) {
+    case VectorFunctionExpr::Type::STRING_TO_VECTOR: {
+      vector<float> values;
+      RC            rc = VectorType::parse(vector_function_expr->arg(), values);
+      if (OB_FAIL(rc)) {
+        LOG_WARN("invalid vector string: %s", vector_function_expr->arg().c_str());
+        return rc;
+      }
+    } break;
+
+    case VectorFunctionExpr::Type::VECTOR_TO_STRING: {
+      if (!vector_function_expr->left() ||
+          vector_function_expr->left()->value_type() != AttrType::VECTORS) {
+        LOG_WARN("VECTOR_TO_STRING expects a vector argument");
+        return RC::INVALID_ARGUMENT;
+      }
+    } break;
+
+    case VectorFunctionExpr::Type::DISTANCE: {
+      if (!vector_function_expr->left() || !vector_function_expr->right() ||
+          vector_function_expr->left()->value_type() != AttrType::VECTORS ||
+          vector_function_expr->right()->value_type() != AttrType::VECTORS) {
+        LOG_WARN("DISTANCE expects two vector arguments");
+        return RC::INVALID_ARGUMENT;
+      }
+      const string &metric = vector_function_expr->arg();
+      if (strcasecmp(metric.c_str(), "COSINE") != 0 && strcasecmp(metric.c_str(), "EUCLIDEAN") != 0 &&
+          strcasecmp(metric.c_str(), "DOT") != 0) {
+        LOG_WARN("unsupported distance metric: %s", metric.c_str());
+        return RC::INVALID_ARGUMENT;
+      }
+    } break;
+  }
+
+  bound_expressions.emplace_back(std::move(expr));
+  return RC::SUCCESS;
 }
 
 RC ExpressionBinder::bind_aggregate_expression(

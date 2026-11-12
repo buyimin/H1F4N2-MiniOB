@@ -26,6 +26,7 @@ See the Mulan PSL v2 for more details. */
 #include "sql/operator/project_logical_operator.h"
 #include "sql/operator/table_get_logical_operator.h"
 #include "sql/operator/group_by_logical_operator.h"
+#include "sql/operator/update_logical_operator.h"
 
 #include "sql/stmt/calc_stmt.h"
 #include "sql/stmt/delete_stmt.h"
@@ -34,6 +35,7 @@ See the Mulan PSL v2 for more details. */
 #include "sql/stmt/insert_stmt.h"
 #include "sql/stmt/select_stmt.h"
 #include "sql/stmt/stmt.h"
+#include "sql/stmt/update_stmt.h"
 
 #include "sql/expr/expression_iterator.h"
 
@@ -68,6 +70,12 @@ RC LogicalPlanGenerator::create(Stmt *stmt, unique_ptr<LogicalOperator> &logical
       rc = create_plan(delete_stmt, logical_operator);
     } break;
 
+    case StmtType::UPDATE: {
+      UpdateStmt *update_stmt = static_cast<UpdateStmt *>(stmt);
+
+      rc = create_plan(update_stmt, logical_operator);
+    } break;
+
     case StmtType::EXPLAIN: {
       ExplainStmt *explain_stmt = static_cast<ExplainStmt *>(stmt);
 
@@ -88,6 +96,12 @@ RC LogicalPlanGenerator::create_plan(CalcStmt *calc_stmt, unique_ptr<LogicalOper
 
 RC LogicalPlanGenerator::create_plan(SelectStmt *select_stmt, unique_ptr<LogicalOperator> &logical_operator)
 {
+  if (select_stmt->tables().empty()) {
+    // SELECT DISTANCE(...) 这类不带 FROM 的常量查询，直接使用 Calc 算子输出一行。
+    logical_operator = make_unique<CalcLogicalOperator>(std::move(select_stmt->query_expressions()));
+    return RC::SUCCESS;
+  }
+
   unique_ptr<LogicalOperator> *last_oper = nullptr;
 
   unique_ptr<LogicalOperator> table_oper(nullptr);
@@ -101,7 +115,9 @@ RC LogicalPlanGenerator::create_plan(SelectStmt *select_stmt, unique_ptr<Logical
   }
 
   const vector<Table *> &tables = select_stmt->tables();
-  for (Table *table : tables) {
+  const vector<FilterStmt *> &join_filter_stmts = select_stmt->join_filter_stmts();
+  for (size_t i = 0; i < tables.size(); i++) {
+    Table *table = tables[i];
 
     unique_ptr<LogicalOperator> table_get_oper(new TableGetLogicalOperator(table, ReadWriteMode::READ_ONLY));
     if (table_oper == nullptr) {
@@ -110,6 +126,22 @@ RC LogicalPlanGenerator::create_plan(SelectStmt *select_stmt, unique_ptr<Logical
       JoinLogicalOperator *join_oper = new JoinLogicalOperator;
       join_oper->add_child(std::move(table_oper));
       join_oper->add_child(std::move(table_get_oper));
+
+      // 将当前表的 ON 条件下推到 join 算子，避免先做笛卡尔积再过滤。
+      if (i < join_filter_stmts.size() && join_filter_stmts[i] != nullptr) {
+        unique_ptr<LogicalOperator> join_predicate_oper;
+        rc = create_plan(join_filter_stmts[i], join_predicate_oper);
+        if (OB_FAIL(rc)) {
+          LOG_WARN("failed to create join predicate logical plan. rc=%s", strrc(rc));
+          return rc;
+        }
+        if (join_predicate_oper) {
+          for (unique_ptr<Expression> &expression : join_predicate_oper->expressions()) {
+            join_oper->add_join_predicate(std::move(expression));
+          }
+        }
+      }
+
       table_oper = unique_ptr<LogicalOperator>(join_oper);
     }
   }
@@ -260,6 +292,34 @@ RC LogicalPlanGenerator::create_plan(DeleteStmt *delete_stmt, unique_ptr<Logical
   }
 
   logical_operator = std::move(delete_oper);
+  return rc;
+}
+
+RC LogicalPlanGenerator::create_plan(UpdateStmt *update_stmt, unique_ptr<LogicalOperator> &logical_operator)
+{
+  Table                      *table       = update_stmt->table();
+  FilterStmt                 *filter_stmt = update_stmt->filter_stmt();
+  unique_ptr<LogicalOperator> table_get_oper(new TableGetLogicalOperator(table, ReadWriteMode::READ_WRITE));
+
+  unique_ptr<LogicalOperator> predicate_oper;
+
+  RC rc = create_plan(filter_stmt, predicate_oper);
+  if (rc != RC::SUCCESS) {
+    LOG_WARN("failed to create predicate logical plan. rc=%s", strrc(rc));
+    return rc;
+  }
+
+  unique_ptr<LogicalOperator> update_oper(
+      new UpdateLogicalOperator(table, update_stmt->field_meta(), update_stmt->value()));
+
+  if (predicate_oper) {
+    predicate_oper->add_child(std::move(table_get_oper));
+    update_oper->add_child(std::move(predicate_oper));
+  } else {
+    update_oper->add_child(std::move(table_get_oper));
+  }
+
+  logical_operator = std::move(update_oper);
   return rc;
 }
 

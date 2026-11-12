@@ -46,6 +46,7 @@ enum class ExprType
   COMPARISON,   ///< 需要做比较的表达式
   CONJUNCTION,  ///< 多个表达式使用同一种关系(AND或OR)来联结
   ARITHMETIC,   ///< 算术运算
+  VECTOR_FUNCTION,  ///< 向量函数：STRING_TO_VECTOR/VECTOR_TO_STRING/DISTANCE
   AGGREGATION,  ///< 聚合运算
 };
 
@@ -439,9 +440,49 @@ private:
   unique_ptr<Expression> right_;
 };
 
-class UnboundAggregateExpr : public Expression
+/**
+ * @brief 向量函数表达式
+ * @ingroup Expression
+ * @details 支持 STRING_TO_VECTOR、VECTOR_TO_STRING 和 DISTANCE。
+ */
+class VectorFunctionExpr : public Expression
 {
 public:
+  enum class Type
+  {
+    STRING_TO_VECTOR,
+    VECTOR_TO_STRING,
+    DISTANCE,
+  };
+
+public:
+  VectorFunctionExpr(Type type, const string &arg, Expression *left = nullptr, Expression *right = nullptr);
+  virtual ~VectorFunctionExpr() = default;
+
+  unique_ptr<Expression> copy() const override;
+
+  bool     equal(const Expression &other) const override;
+  ExprType type() const override { return ExprType::VECTOR_FUNCTION; }
+
+  AttrType value_type() const override;
+  int      value_length() const override;
+
+  RC get_value(const Tuple &tuple, Value &value) const override;
+
+  unique_ptr<Expression> &left() { return left_; }
+  unique_ptr<Expression> &right() { return right_; }
+  const string           &arg() const { return arg_; }
+  Type                    func_type() const { return type_; }
+
+private:
+  Type                   type_;
+  string                 arg_;
+  unique_ptr<Expression> left_;
+  unique_ptr<Expression> right_;
+};
+
+class UnboundAggregateExpr : public Expression
+{public:
   UnboundAggregateExpr(const char *aggregate_name, Expression *child);
   UnboundAggregateExpr(const char *aggregate_name, unique_ptr<Expression> child);
   virtual ~UnboundAggregateExpr() = default;

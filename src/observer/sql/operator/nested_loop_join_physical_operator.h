@@ -14,6 +14,7 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
+#include "sql/expr/expression.h"
 #include "sql/operator/physical_operator.h"
 #include "sql/parser/parse.h"
 
@@ -26,6 +27,7 @@ class NestedLoopJoinPhysicalOperator : public PhysicalOperator
 {
 public:
   NestedLoopJoinPhysicalOperator();
+  explicit NestedLoopJoinPhysicalOperator(unique_ptr<Expression> predicate);
   virtual ~NestedLoopJoinPhysicalOperator() = default;
 
   PhysicalOperatorType type() const override { return PhysicalOperatorType::NESTED_LOOP_JOIN; }
@@ -46,6 +48,7 @@ public:
 private:
   RC left_next();   //! 左表遍历下一条数据
   RC right_next();  //! 右表遍历下一条数据，如果上一轮结束了就重新开始新的一轮
+  RC next_internal();  //! 不考虑 join 条件，取下一组左右 tuple
 
   // TODO: remove this func
   // Expression *predicate() { return predicate_; }
@@ -61,4 +64,5 @@ private:
   JoinedTuple       joined_tuple_;         //! 当前关联的左右两个tuple
   bool              round_done_   = true;  //! 右表遍历的一轮是否结束
   bool              right_closed_ = true;  //! 右表算子是否已经关闭
+  unique_ptr<Expression> predicate_;       //! ON 条件，在 join 过程中提前过滤
 };

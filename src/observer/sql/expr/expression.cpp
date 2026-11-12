@@ -16,6 +16,11 @@ See the Mulan PSL v2 for more details. */
 #include "sql/expr/tuple.h"
 #include "sql/expr/arithmetic_operator.hpp"
 
+#include <math.h>
+#include <strings.h>
+
+#include "common/type/vector_type.h"
+
 using namespace std;
 
 RC FieldExpr::get_value(const Tuple &tuple, Value &value) const
@@ -548,6 +553,156 @@ RC ArithmeticExpr::try_get_value(Value &value) const
   }
 
   return calc_value(left_value, right_value, value);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+VectorFunctionExpr::VectorFunctionExpr(Type type, const string &arg, Expression *left, Expression *right)
+    : type_(type), arg_(arg), left_(left), right_(right)
+{}
+
+unique_ptr<Expression> VectorFunctionExpr::copy() const
+{
+  unique_ptr<Expression> left_copy  = left_ ? left_->copy() : nullptr;
+  unique_ptr<Expression> right_copy = right_ ? right_->copy() : nullptr;
+  return make_unique<VectorFunctionExpr>(type_, arg_, left_copy.release(), right_copy.release());
+}
+
+bool VectorFunctionExpr::equal(const Expression &other) const
+{
+  if (this == &other) {
+    return true;
+  }
+  if (other.type() != ExprType::VECTOR_FUNCTION) {
+    return false;
+  }
+  const auto &other_func = static_cast<const VectorFunctionExpr &>(other);
+  if (type_ != other_func.type_ || arg_ != other_func.arg_) {
+    return false;
+  }
+  if (static_cast<bool>(left_) != static_cast<bool>(other_func.left_)) {
+    return false;
+  }
+  if (static_cast<bool>(right_) != static_cast<bool>(other_func.right_)) {
+    return false;
+  }
+  if (left_ && !left_->equal(*other_func.left_)) {
+    return false;
+  }
+  if (right_ && !right_->equal(*other_func.right_)) {
+    return false;
+  }
+  return true;
+}
+
+AttrType VectorFunctionExpr::value_type() const
+{
+  switch (type_) {
+    case Type::STRING_TO_VECTOR: return AttrType::VECTORS;
+    case Type::VECTOR_TO_STRING: return AttrType::CHARS;
+    case Type::DISTANCE: return AttrType::FLOATS;
+  }
+  return AttrType::UNDEFINED;
+}
+
+int VectorFunctionExpr::value_length() const
+{
+  switch (type_) {
+    case Type::DISTANCE: return sizeof(float);
+    default: return -1;
+  }
+}
+
+RC VectorFunctionExpr::get_value(const Tuple &tuple, Value &value) const
+{
+  switch (type_) {
+    case Type::STRING_TO_VECTOR: {
+      vector<float> values;
+      RC            rc = VectorType::parse(arg_, values);
+      if (OB_FAIL(rc)) {
+        LOG_WARN("failed to parse vector string: %s", arg_.c_str());
+        return rc;
+      }
+      value.set_vector(values.data(), static_cast<int>(values.size()));
+      return RC::SUCCESS;
+    }
+
+    case Type::VECTOR_TO_STRING: {
+      if (left_ == nullptr) {
+        return RC::INVALID_ARGUMENT;
+      }
+      Value child_value;
+      RC    rc = left_->get_value(tuple, child_value);
+      if (OB_FAIL(rc)) {
+        return rc;
+      }
+      if (child_value.attr_type() != AttrType::VECTORS) {
+        LOG_WARN("VECTOR_TO_STRING expects a vector value");
+        return RC::SCHEMA_FIELD_TYPE_MISMATCH;
+      }
+      value.set_string(child_value.to_string().c_str());
+      return RC::SUCCESS;
+    }
+
+    case Type::DISTANCE: {
+      if (left_ == nullptr || right_ == nullptr) {
+        return RC::INVALID_ARGUMENT;
+      }
+      Value left_value;
+      Value right_value;
+      RC    rc = left_->get_value(tuple, left_value);
+      if (OB_FAIL(rc)) {
+        return rc;
+      }
+      rc = right_->get_value(tuple, right_value);
+      if (OB_FAIL(rc)) {
+        return rc;
+      }
+      if (left_value.attr_type() != AttrType::VECTORS || right_value.attr_type() != AttrType::VECTORS) {
+        LOG_WARN("DISTANCE expects two vector values");
+        return RC::SCHEMA_FIELD_TYPE_MISMATCH;
+      }
+
+      const int dim = left_value.length() / static_cast<int>(sizeof(float));
+      if (right_value.length() != left_value.length() || dim <= 0) {
+        LOG_WARN("vector dimensions are not equal");
+        return RC::SCHEMA_FIELD_TYPE_MISMATCH;
+      }
+
+      const float *left_data  = reinterpret_cast<const float *>(left_value.data());
+      const float *right_data = reinterpret_cast<const float *>(right_value.data());
+
+      float dot    = 0.0f;
+      float norm_a = 0.0f;
+      float norm_b = 0.0f;
+      float l2_sum = 0.0f;
+      for (int i = 0; i < dim; i++) {
+        dot += left_data[i] * right_data[i];
+        norm_a += left_data[i] * left_data[i];
+        norm_b += right_data[i] * right_data[i];
+        const float diff = left_data[i] - right_data[i];
+        l2_sum += diff * diff;
+      }
+
+      if (strcasecmp(arg_.c_str(), "COSINE") == 0) {
+        const float denom = sqrtf(norm_a) * sqrtf(norm_b);
+        value.set_float(denom == 0.0f ? 1.0f : 1.0f - dot / denom);
+        return RC::SUCCESS;
+      }
+      if (strcasecmp(arg_.c_str(), "EUCLIDEAN") == 0) {
+        value.set_float(sqrtf(l2_sum));
+        return RC::SUCCESS;
+      }
+      if (strcasecmp(arg_.c_str(), "DOT") == 0) {
+        value.set_float(dot);
+        return RC::SUCCESS;
+      }
+
+      LOG_WARN("unsupported distance metric: %s", arg_.c_str());
+      return RC::INVALID_ARGUMENT;
+    }
+  }
+  return RC::INTERNAL;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

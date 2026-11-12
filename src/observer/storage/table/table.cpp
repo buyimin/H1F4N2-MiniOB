@@ -253,6 +253,11 @@ RC Table::make_record(int value_num, const Value *values, Record &record)
 
 RC Table::set_value_to_record(char *record_data, const Value &value, const FieldMeta *field)
 {
+  if (field->type() == AttrType::VECTORS && value.length() != field->len()) {
+    LOG_WARN("vector dimension mismatch. table field len=%d, value len=%d", field->len(), value.length());
+    return RC::SCHEMA_FIELD_TYPE_MISMATCH;
+  }
+
   size_t       copy_len = field->len();
   const size_t data_len = value.length();
   if (field->type() == AttrType::CHARS) {

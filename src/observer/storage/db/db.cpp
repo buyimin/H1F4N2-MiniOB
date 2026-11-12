@@ -18,6 +18,7 @@ See the Mulan PSL v2 for more details. */
 #include <sys/stat.h>
 
 #include "common/lang/string.h"
+#include "common/lang/filesystem.h"
 #include "common/log/log.h"
 #include "common/os/path.h"
 #include "common/global_context.h"
@@ -174,6 +175,65 @@ RC Db::create_table(const char *table_name, span<const AttrInfoSqlNode> attribut
   opened_tables_[table_name] = table;
   LOG_INFO("Create table success. table name=%s, table_id:%d", table_name, table_id);
   return RC::SUCCESS;
+}
+
+RC Db::drop_table(const char *table_name)
+{
+  if (nullptr == table_name || common::is_blank(table_name)) {
+    LOG_WARN("invalid table name");
+    return RC::INVALID_ARGUMENT;
+  }
+
+  auto iter = opened_tables_.find(table_name);
+  if (iter == opened_tables_.end()) {
+    LOG_WARN("no such table. db=%s, table_name=%s", name_.c_str(), table_name);
+    return RC::SCHEMA_TABLE_NOT_EXIST;
+  }
+
+  Table *table = iter->second;
+  // 删除表对象之前先把后面要用的信息拷贝出来
+  const string    dropped_table_name(table->name());
+  const TableMeta &table_meta = table->table_meta();
+
+  vector<string> index_names;
+  index_names.reserve(table_meta.index_num());
+  for (int i = 0; i < table_meta.index_num(); i++) {
+    const IndexMeta *index_meta = table_meta.index(i);
+    if (index_meta != nullptr) {
+      index_names.emplace_back(index_meta->name());
+    }
+  }
+
+  // 先从内存中的表集合摘除，再析构 Table。
+  // Table 析构时会关闭数据文件、删除内存中的索引对象并关闭索引文件，
+  // 因此文件删除必须放在 delete table 之后。
+  opened_tables_.erase(iter);
+  delete table;
+
+  RC rc = RC::SUCCESS;
+  auto remove_file = [&rc](const string &file_path) {
+    error_code ec;
+    filesystem::remove(file_path, ec);
+    if (ec) {
+      LOG_WARN("failed to remove table file. file=%s, error=%s", file_path.c_str(), ec.message().c_str());
+      rc = RC::IOERR_WRITE;
+    }
+  };
+
+  remove_file(table_meta_file(path_.c_str(), dropped_table_name.c_str()));
+  remove_file(table_data_file(path_.c_str(), dropped_table_name.c_str()));
+  remove_file(table_lob_file(path_.c_str(), dropped_table_name.c_str()));
+  remove_file(table_meta_file(path_.c_str(), dropped_table_name.c_str()) + ".tmp");
+  for (const string &index_name : index_names) {
+    remove_file(table_index_file(path_.c_str(), dropped_table_name.c_str(), index_name.c_str()));
+  }
+
+  if (rc == RC::SUCCESS) {
+    LOG_INFO("Successfully drop table. db=%s, table=%s", name_.c_str(), dropped_table_name.c_str());
+  } else {
+    LOG_WARN("drop table finished with file removal errors. db=%s, table=%s", name_.c_str(), dropped_table_name.c_str());
+  }
+  return rc;
 }
 
 Table *Db::find_table(const char *table_name) const
